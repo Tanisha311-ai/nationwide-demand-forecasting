@@ -1,0 +1,19 @@
+[
+    "item_id",
+    "dept_id",
+    "cat_id",
+    "store_id",
+    "state_id",
+    "day_num",
+    "sell_price",
+    "wday",
+    "month",
+    "year",
+    "is_event",
+    "is_weekend",
+    "snap",
+    "lag_7",
+    "lag_28",
+    "rolling_mean_7",
+    "rolling_mean_28"
+]
