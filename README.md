@@ -1,9 +1,9 @@
 
 # Nationwide Demand Forecasting and Inventory Optimization
 
-An end-to-end data science project that forecasts product demand, evaluates predictions on unseen data, and translates forecasts into inventory replenishment recommendations.
+An end-to-end data science project that forecasts retail product demand, evaluates predictions on unseen data, and translates forecasts into inventory replenishment recommendations.
 
-The project uses the M5 retail sales dataset, LightGBM forecasting, time-series holdout validation, inventory risk assessment, and an interactive Streamlit dashboard.
+This project uses the M5 retail sales dataset, LightGBM forecasting, time-series holdout validation, inventory risk assessment, and an interactive Streamlit dashboard.
 
 ## Project Objectives
 
@@ -32,8 +32,8 @@ The project uses the M5 retail sales dataset, LightGBM forecasting, time-series 
 3. LightGBM demand forecasting.
 4. Model evaluation against a seasonal baseline.
 5. Bottom-up aggregation of forecasts to higher levels.
-6. Inventory optimization and replenishment recommendations.
-7. Future holdout validation using a 28-day forecast horizon.
+6. Future holdout validation using a 28-day forecast horizon.
+7. Inventory optimization and replenishment recommendations.
 8. Store and product-store segment evaluation.
 9. Inventory risk assessment.
 10. Interactive dashboard for reviewing results.
@@ -49,7 +49,13 @@ The model was evaluated on a future 28-day holdout period for the selected produ
 
 LightGBM reduced WAPE by approximately 14.82% relative to the seasonal baseline on this evaluation set.
 
-These are offline evaluation results for the selected combinations, not a guarantee of production performance.
+These results represent offline evaluation on the selected combinations and do not guarantee production performance.
+
+### Evaluation Metrics
+
+- **MAE:** Measures the average absolute difference between actual and predicted demand.
+- **RMSE:** Penalizes larger prediction errors more heavily.
+- **WAPE:** Measures total absolute forecast error relative to total actual demand.
 
 ## Inventory Optimization
 
@@ -61,33 +67,57 @@ The inventory module estimates:
 - Recommended replenishment quantities
 - Potential stockout and overstock risks
 
-The current prototype uses a three-day lead time, a seven-day review period, and a target service-level z-score of 1.645.
+The current prototype uses the following assumptions:
 
-**Important:** The M5 dataset does not provide actual stock-on-hand quantities. Inventory levels in this project are simulated from historical demand. Consequently, order quantities and inventory risk classifications are illustrative recommendations, not live operational decisions.
+- Lead time: 3 days
+- Review period: 7 days
+- Historical demand window: 56 days
+- Service-level z-score: 1.645
 
-## Dashboard
+**Important limitation:** The M5 dataset does not provide actual stock-on-hand quantities. Inventory levels in this project are simulated from historical demand. Therefore, replenishment quantities and inventory risk classifications are illustrative recommendations, not live operational decisions.
+
+## Interactive Dashboard
 
 The Streamlit dashboard contains three sections:
 
-- **Forecast Evaluation:** model metrics and forecast evaluation.
-- **Store Performance:** store-level forecast performance and filtering.
-- **Inventory Optimization:** inventory status, replenishment recommendations, and risk assessment.
+### 1. Forecast Evaluation
+
+- Displays model evaluation metrics.
+- Compares LightGBM performance against the seasonal baseline.
+- Supports review of forecast performance.
+
+### 2. Store Performance
+
+- Displays store-level forecast performance.
+- Allows filtering using WAPE.
+- Helps identify stores where forecasting errors require further investigation.
+
+### 3. Inventory Optimization
+
+- Displays inventory status and recommendations.
+- Supports filtering by store and inventory status.
+- Shows inventory risk assessments.
+- Provides CSV downloads for further analysis.
 
 ## Dataset
 
 This project uses the M5 retail sales forecasting dataset, which contains historical Walmart sales data alongside calendar and selling-price information.
 
-The raw CSV files are not included in this repository because of their size and licensing considerations. Obtain the dataset from its original source and place the required files in `data/raw/`.
+The raw dataset files are not included in this repository because of their size.
 
-Required files include:
+Download the dataset from:
+
+https://www.kaggle.com/competitions/m5-forecasting-accuracy/data
+
+Place the required files in the `data/raw/` directory.
+
+Required files:
 
 - `calendar.csv`
 - `sales_train_evaluation.csv`
 - `sales_train_validation.csv`
 - `sell_prices.csv`
 - `sample_submission.csv`
-
-Dataset source: https://www.kaggle.com/competitions/m5-forecasting-accuracy/data
 
 ## Project Structure
 
@@ -98,6 +128,8 @@ nationwide-demand-forecasting/
 │   ├── processed/
 │   └── outputs/
 ├── models/
+├── notebooks/
+├── reports/
 ├── 01_preprocessing.py
 ├── 02_features.py
 ├── 03_forecasting.py
@@ -110,7 +142,8 @@ nationwide-demand-forecasting/
 ├── app.py
 ├── config.py
 ├── requirements.txt
-└── README.md
+├── README.md
+└── .gitignore
 ```
 
 ## Installation and Setup
@@ -122,30 +155,32 @@ git clone https://github.com/Tanisha311-ai/nationwide-demand-forecasting.git
 cd nationwide-demand-forecasting
 ```
 
-Replace `YOUR-USERNAME` with your GitHub username.
-
 ### 2. Create a virtual environment
 
-Windows:
+On Windows, run:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
+If PowerShell blocks activation, you can use the environment's Python executable directly instead.
+
 ### 3. Install dependencies
 
-```bash
+```powershell
 python -m pip install -r requirements.txt
 ```
 
 ### 4. Add the dataset
 
-Place the required M5 CSV files in `data/raw/`.
+Download the required M5 CSV files and place them in `data/raw/`.
+
+Ensure that the directory and filenames match the paths expected by the scripts.
 
 ### 5. Run the pipeline
 
-Run the scripts in the following order from the project root:
+Run these commands from the project root in the following order:
 
 ```powershell
 python 01_preprocessing.py
@@ -153,29 +188,35 @@ python 02_features.py
 python 03_forecasting.py
 python 04_evaluation.py
 python 05_reconciliation.py
-python 06_inventory.py
 python 07_future_validation.py
+python 06_inventory.py
 python 08_segment_evaluation.py
 python 09_inventory_risk.py
 ```
 
-Run the dashboard after generating the required outputs:
+Each script depends on files generated by earlier steps. If a script fails, inspect the error and verify that its required input files exist.
+
+### 6. Launch the dashboard
+
+After the required output files have been generated, run:
 
 ```powershell
 python -m streamlit run app.py
 ```
 
-Check each script's output and dependencies before running the full pipeline on a fresh installation.
+The dashboard will open in your browser.
 
 ## Limitations and Future Improvements
 
-- Expand evaluation beyond the selected 50 products and across more forecasting horizons.
-- Tune model hyperparameters and compare additional forecasting approaches.
+- Expand evaluation to more products, stores, and forecast horizons.
+- Tune LightGBM hyperparameters and compare additional forecasting models.
 - Add automated tests and data-quality checks.
 - Incorporate real inventory, supplier lead-time, ordering-cost, and holding-cost data when available.
-- Evaluate advanced hierarchical reconciliation methods such as MinT.
-- Improve deployment, experiment tracking, and monitoring.
+- Evaluate advanced hierarchical forecast reconciliation methods such as MinT.
+- Improve deployment, experiment tracking, and model monitoring.
+- Explore probabilistic forecasts and service-level optimization.
 
 ## Author
 
 Developed as a data science portfolio project focused on demand forecasting, model evaluation, inventory analytics, and decision support.
+
