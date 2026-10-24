@@ -10,6 +10,16 @@ OUTPUT_DIR = DATA_DIR / "outputs"
 MODEL_DIR = BASE_DIR / "models"
 REPORT_DIR = BASE_DIR / "reports"
 
+# Create directories if they do not exist
+for directory in (
+    RAW_DATA_DIR,
+    PROCESSED_DATA_DIR,
+    OUTPUT_DIR,
+    MODEL_DIR,
+    REPORT_DIR,
+):
+    directory.mkdir(parents=True, exist_ok=True)
+
 # Dataset file paths
 CALENDAR_FILE = RAW_DATA_DIR / "calendar.csv"
 SALES_TRAIN_FILE = RAW_DATA_DIR / "sales_train_evaluation.csv"
@@ -38,3 +48,4 @@ FUTURE_METRICS_FILE = OUTPUT_DIR / "future_28_day_metrics.csv"
 INVENTORY_OPTIMIZATION_FILE = OUTPUT_DIR / "inventory_optimization.csv"
 INVENTORY_RISK_FILE = OUTPUT_DIR / "inventory_risk_assessment.csv"
 REPLENISHMENT_FILE = OUTPUT_DIR / "replenishment_recommendations.csv"
+
