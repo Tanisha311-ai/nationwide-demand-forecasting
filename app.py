@@ -1,4 +1,5 @@
 
+
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +36,7 @@ inventory = load_csv("inventory_optimization.csv")
 risk = load_csv("inventory_risk_assessment.csv")
 orders = load_csv("replenishment_recommendations.csv")
 
+
 if metrics.empty:
     st.error(
         "Forecast metrics not found. Run 07_future_validation.py "
@@ -42,27 +44,41 @@ if metrics.empty:
     )
     st.stop()
 
+
+# --------------------------------------------------
+# PROJECT OVERVIEW
+# --------------------------------------------------
+
 st.header("Project Overview")
 
 model_col = next(
     (c for c in ["model", "Model"] if c in metrics.columns),
     None
 )
+
 wape_col = next(
     (c for c in ["WAPE_percent", "wape_percent"] if c in metrics.columns),
     None
 )
 
 model_wape = {}
+
 if model_col and wape_col:
     model_wape = dict(zip(metrics[model_col], metrics[wape_col]))
 
 lightgbm_wape = next(
-    (v for k, v in model_wape.items() if "lightgbm" in str(k).lower()),
+    (
+        v for k, v in model_wape.items()
+        if "lightgbm" in str(k).lower()
+    ),
     None
 )
+
 baseline_wape = next(
-    (v for k, v in model_wape.items() if "baseline" in str(k).lower()),
+    (
+        v for k, v in model_wape.items()
+        if "baseline" in str(k).lower()
+    ),
     None
 )
 
@@ -70,11 +86,14 @@ col1, col2, col3, col4 = st.columns(4)
 
 col1.metric(
     "Holdout forecast WAPE",
-    f"{lightgbm_wape:.2f}%" if lightgbm_wape is not None else "N/A"
+    f"{lightgbm_wape:.2f}%"
+    if lightgbm_wape is not None else "N/A"
 )
+
 col2.metric(
     "Seasonal baseline WAPE",
-    f"{baseline_wape:.2f}%" if baseline_wape is not None else "N/A"
+    f"{baseline_wape:.2f}%"
+    if baseline_wape is not None else "N/A"
 )
 
 if lightgbm_wape is not None and baseline_wape not in (None, 0):
@@ -90,29 +109,56 @@ col4.metric(
 
 st.divider()
 
+
+# --------------------------------------------------
+# DASHBOARD TABS
+# --------------------------------------------------
+
 forecast_tab, store_tab, inventory_tab = st.tabs(
-    ["Forecast Evaluation", "Store Performance", "Inventory Optimization"]
+    [
+        "Forecast Evaluation",
+        "Store Performance",
+        "Inventory Optimization"
+    ]
 )
+
+
+# --------------------------------------------------
+# TAB 1: FORECAST EVALUATION
+# --------------------------------------------------
 
 with forecast_tab:
     st.subheader("Future Holdout Model Comparison")
+
     st.write(
         "The model is evaluated on the future 28-day holdout period. "
         "Lower WAPE, MAE, and RMSE generally indicate better accuracy."
     )
-    st.dataframe(metrics, use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        metrics,
+        use_container_width=True,
+        hide_index=True
+    )
 
     if not forecasts.empty:
+
         if "item_id" in forecasts.columns:
-            item_options = sorted(forecasts["item_id"].dropna().unique())
+            item_options = sorted(
+                forecasts["item_id"].dropna().unique()
+            )
+
             selected_item = st.selectbox(
                 "Select a product",
-                ["All products"] + item_options
+                ["All products"] + item_options,
+                key="forecast_product_filter"
             )
 
             view = forecasts.copy()
+
             if selected_item != "All products":
                 view = view[view["item_id"] == selected_item]
+
         else:
             view = forecasts.copy()
 
@@ -128,22 +174,36 @@ with forecast_tab:
             None
         )
 
-        if day_col and actual_col in view.columns and predicted_col in view.columns:
+        if (
+            day_col
+            and actual_col in view.columns
+            and predicted_col in view.columns
+        ):
+            chart_columns = [actual_col, predicted_col]
+
+            if baseline_col in view.columns:
+                chart_columns.append(baseline_col)
+
             chart_data = (
-                view.groupby(day_col, as_index=False)[
-                    [actual_col, predicted_col]
-                    + ([baseline_col] if baseline_col in view.columns else [])
-                ]
+                view.groupby(day_col, as_index=False)[chart_columns]
                 .sum()
             )
+
             chart_data = chart_data.set_index(day_col)
+
             st.subheader("Actual vs Forecast Demand")
             st.line_chart(chart_data)
+
         else:
             st.info(
                 "A daily trend chart requires a day/date column in the "
                 "forecast output. The evaluation table is still available."
             )
+
+
+# --------------------------------------------------
+# TAB 2: STORE PERFORMANCE
+# --------------------------------------------------
 
 with store_tab:
     st.subheader("Forecast Performance by Store")
@@ -152,6 +212,7 @@ with store_tab:
         st.warning(
             "Store metrics not found. Run 08_segment_evaluation.py first."
         )
+
     else:
         if "WAPE_percent" in stores.columns:
             max_wape = float(stores["WAPE_percent"].max())
@@ -161,13 +222,16 @@ with store_tab:
                 "Maximum WAPE (%)",
                 min_value=0.0,
                 max_value=max(100.0, max_wape),
-                value=max_wape
+                value=max_wape,
+                key="store_wape_filter"
             )
+
             filtered_stores = stores[
                 stores["WAPE_percent"] <= chosen_wape
             ]
+
         else:
-            filtered_stores = stores
+            filtered_stores = stores.copy()
 
         st.dataframe(
             filtered_stores,
@@ -183,8 +247,14 @@ with store_tab:
             chart = filtered_stores.set_index("store_id")[
                 ["WAPE_percent"]
             ]
+
             st.subheader("WAPE by Store")
             st.bar_chart(chart)
+
+
+# --------------------------------------------------
+# TAB 3: INVENTORY OPTIMIZATION
+# --------------------------------------------------
 
 with inventory_tab:
     st.subheader("Inventory Recommendations")
@@ -193,90 +263,181 @@ with inventory_tab:
         st.warning(
             "Inventory results not found. Run 06_inventory.py first."
         )
+
     else:
+        # Summary metrics use the complete inventory dataset.
         col_a, col_b, col_c = st.columns(3)
 
-        col_a.metric("Product-store combinations", f"{len(inventory):,}")
+        col_a.metric(
+            "Product-store combinations",
+            f"{len(inventory):,}"
+        )
 
         if "recommended_order_units" in inventory.columns:
             total_order = inventory["recommended_order_units"].sum()
-            col_b.metric("Recommended units", f"{total_order:,.0f}")
+
+            col_b.metric(
+                "Recommended units",
+                f"{total_order:,.0f}"
+            )
         else:
             col_b.metric("Recommended units", "N/A")
 
         if "inventory_status" in inventory.columns:
             review_count = (
-                inventory["inventory_status"] == "Manual review required"
+                inventory["inventory_status"]
+                == "Manual review required"
             ).sum()
+
             col_c.metric("Manual review", f"{review_count:,}")
+
         else:
             col_c.metric("Manual review", "N/A")
 
-        if "inventory_status" in inventory.columns:
-            status_counts = inventory["inventory_status"].value_counts()
-            st.subheader("Inventory Status")
-            st.bar_chart(status_counts)
+        st.divider()
 
-        if "recommended_order_units" in inventory.columns:
-            st.subheader("Filter Replenishment Recommendations")
+        # ------------------------------------------
+        # FILTERS
+        # ------------------------------------------
 
-            if "store_id" in inventory.columns:
-                store_options = sorted(inventory["store_id"].dropna().unique())
+        st.subheader("Filter Replenishment Recommendations")
+
+        inventory_view = inventory.copy()
+
+        filter_col1, filter_col2 = st.columns(2)
+
+        # Store filter
+        if "store_id" in inventory_view.columns:
+            store_options = sorted(
+                inventory_view["store_id"].dropna().unique()
+            )
+
+            with filter_col1:
                 selected_store = st.selectbox(
                     "Filter by store",
-                    ["All stores"] + store_options
+                    ["All stores"] + store_options,
+                    key="inventory_store_filter"
                 )
-            else:
-                selected_store = "All stores"
 
-            inventory_view = inventory.copy()
-
-            if selected_store != "All stores" and "store_id" in inventory_view.columns:
+            if selected_store != "All stores":
                 inventory_view = inventory_view[
                     inventory_view["store_id"] == selected_store
                 ]
 
-            if "inventory_status" in inventory_view.columns:
-                status_options = sorted(
-                    inventory_view["inventory_status"].dropna().unique()
-                )
+        # Status filter
+        if "inventory_status" in inventory_view.columns:
+            status_options = sorted(
+                inventory_view["inventory_status"]
+                .dropna()
+                .unique()
+            )
+
+            with filter_col2:
                 selected_status = st.multiselect(
                     "Filter by inventory status",
                     status_options,
-                    default=status_options
+                    default=status_options,
+                    key="inventory_status_filter"
                 )
-                inventory_view = inventory_view[
-                    inventory_view["inventory_status"].isin(selected_status)
-                ]
 
-            sort_col = "recommended_order_units"
+            inventory_view = inventory_view[
+                inventory_view["inventory_status"].isin(selected_status)
+            ]
+
+        # ------------------------------------------
+        # FIXED INVENTORY STATUS BAR CHART
+        # Uses inventory_view AFTER applying filters.
+        # ------------------------------------------
+
+        if "inventory_status" in inventory_view.columns:
+            st.subheader("Inventory Status")
+
+            status_order = [
+                "Stock sufficient",
+                "Reorder",
+                "Manual review required",
+                "High stockout risk",
+                "Potential overstock risk",
+                "Normal"
+            ]
+
+            status_counts = (
+                inventory_view["inventory_status"]
+                .value_counts()
+                .reindex(
+                    [
+                        status
+                        for status in status_order
+                        if status in inventory_view["inventory_status"].values
+                    ],
+                    fill_value=0
+                )
+            )
+
+            # Show a helpful message when filters return no rows.
+            if inventory_view.empty:
+                st.info("No inventory records match the selected filters.")
+
+            else:
+                st.bar_chart(status_counts)
+
+        # ------------------------------------------
+        # FILTERED INVENTORY TABLE
+        # ------------------------------------------
+
+        if "recommended_order_units" in inventory_view.columns:
             inventory_view = inventory_view.sort_values(
-                sort_col,
+                "recommended_order_units",
                 ascending=False
             )
 
-            st.dataframe(
-                inventory_view,
-                use_container_width=True,
-                hide_index=True
-            )
+        st.subheader("Filtered Inventory Records")
 
-            st.download_button(
-                "Download filtered inventory CSV",
-                data=inventory_view.to_csv(index=False).encode("utf-8"),
-                file_name="filtered_inventory_recommendations.csv",
-                mime="text/csv"
-            )
+        st.dataframe(
+            inventory_view,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ------------------------------------------
+        # DOWNLOAD FILTERED DATA
+        # ------------------------------------------
+
+        st.download_button(
+            "Download filtered inventory CSV",
+            data=inventory_view.to_csv(index=False).encode("utf-8"),
+            file_name="filtered_inventory_recommendations.csv",
+            mime="text/csv",
+            key="download_filtered_inventory"
+        )
+
+    # ----------------------------------------------
+    # INVENTORY RISK ASSESSMENT
+    # ----------------------------------------------
 
     if not risk.empty:
+        st.divider()
         st.subheader("Inventory Risk Assessment")
+
         if "risk_classification" in risk.columns:
-            st.bar_chart(risk["risk_classification"].value_counts())
-        st.dataframe(risk, use_container_width=True, hide_index=True)
+            risk_counts = risk["risk_classification"].value_counts()
+            st.bar_chart(risk_counts)
+
+        st.dataframe(
+            risk,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
 st.divider()
+
 st.caption(
-    "Important: stock-on-hand is simulated because actual inventory data "
-    "is unavailable. Replenishment quantities are illustrative, not live "
-    "purchase orders."
+    "Important: stock-on-hand is simulated because actual inventory "
+    "data is unavailable. Replenishment quantities are illustrative, "
+    "not live purchase orders."
 )

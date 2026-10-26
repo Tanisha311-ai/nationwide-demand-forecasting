@@ -12,6 +12,7 @@
     "is_event",
     "is_weekend",
     "snap",
+    "lag_1",
     "lag_7",
     "lag_28",
     "rolling_mean_7",

@@ -1,8 +1,28 @@
 
+# Data processing
 pandas
 numpy
+scipy
+
+# Machine learning
 scikit-learn
 lightgbm
-streamlit
+
+# Time-series forecasting
+prophet
+torch
+pytorch-forecasting
+darts
+
+# Inventory optimization
+ortools
+
+# Dashboard and visualization
+dash
+plotly
 matplotlib
 seaborn
+
+# Utilities
+joblib
+

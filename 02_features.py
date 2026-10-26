@@ -175,22 +175,27 @@ df = df.merge(
 
 df = df.sort_values(["id", "day_num"]).reset_index(drop=True)
 
+# Fill missing prices using previously observed prices only.
 df["sell_price"] = (
     df.groupby("id", sort=False)["sell_price"]
-    .transform(lambda x: x.ffill().bfill())
+    .transform(lambda x: x.ffill())
 )
 
 
-# 7. CREATE LAG AND ROLLING FEATURES
 
+
+# 7. CREATE LAG AND ROLLING FEATURES
 
 print("\nCreating lag and rolling-average features...")
 
 grouped_sales = df.groupby("id", sort=False)["sales"]
 
+# Lag features
+df["lag_1"] = grouped_sales.shift(1)
 df["lag_7"] = grouped_sales.shift(7)
 df["lag_28"] = grouped_sales.shift(28)
 
+# Rolling features use only previous days to avoid data leakage
 df["rolling_mean_7"] = grouped_sales.transform(
     lambda x: x.shift(1).rolling(7, min_periods=7).mean()
 )
@@ -199,10 +204,14 @@ df["rolling_mean_28"] = grouped_sales.transform(
     lambda x: x.shift(1).rolling(28, min_periods=28).mean()
 )
 
-# Releasing references to reduce memory use
-del grouped_sales, calendar, prices
+# Release references to reduce memory use
+del grouped_sales
 gc.collect()
 
+
+# Releasing references to reduce memory use
+del calendar, prices
+gc.collect()
 
 # 8. CREATING TRAINING AND VALIDATION SETS
 
@@ -214,8 +223,11 @@ validation_start = max_day - VALIDATION_DAYS
 
 # Removing rows without sufficient lag history
 feature_cols = [
-    "lag_7", "lag_28",
-    "rolling_mean_7", "rolling_mean_28"
+    "lag_1",
+    "lag_7",
+    "lag_28",
+    "rolling_mean_7",
+    "rolling_mean_28"
 ]
 
 df = df.dropna(subset=feature_cols + ["sales"]).copy()
@@ -227,7 +239,7 @@ model_columns = [
     "day_num", "sales", "sell_price",
     "wday", "month", "year", "is_event",
     "is_weekend", "snap",
-    "lag_7", "lag_28",
+    "lag_1", "lag_7", "lag_28",
     "rolling_mean_7", "rolling_mean_28"
 ]
 
