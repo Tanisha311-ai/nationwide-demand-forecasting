@@ -1,276 +1,798 @@
 
-from pathlib import Path
 
+import os
 import numpy as np
 import pandas as pd
 
-BASE_DIR = Path(__file__).resolve().parent
-TRAIN_PATH = BASE_DIR / "data" / "processed" / "train_features.csv"
-FORECAST_PATH = BASE_DIR / "data" / "outputs" / "forecast_validation.csv"
-OUTPUT_DIR = BASE_DIR / "data" / "outputs"
+# ============================================================
+# 1. CONFIGURATION
+# ============================================================
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+FORECAST_HORIZON = 28
 
-print("Loading training history and LightGBM forecasts...", flush=True)
+TRAIN_PATH = "data/processed/train_features.csv"
+VALIDATION_PATH = "data/outputs/forecast_validation.csv"
+HIERARCHY_PATH = "data/outputs/hierarchy_summation_matrix.csv"
 
-train = pd.read_csv(
-    TRAIN_PATH,
-    usecols=["item_id", "store_id", "state_id", "date", "sales"],
-)
+OUTPUT_DIR = "data/outputs"
 
-forecast = pd.read_csv(FORECAST_PATH)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-train["date"] = pd.to_datetime(train["date"])
-forecast["date"] = pd.to_datetime(forecast["date"])
 
-# Actual observations available for rolling one-day-ahead evaluation.
-validation_actuals = forecast[
-    ["item_id", "store_id", "state_id", "date", "actual_sales"]
-].rename(columns={"actual_sales": "sales"})
+# ============================================================
+# 2. HELPER FUNCTIONS
+# ============================================================
 
-history = pd.concat(
-    [train, validation_actuals],
-    ignore_index=True,
-)
+def calculate_wape(actual, predicted):
 
-history = history.sort_values(
-    ["item_id", "store_id", "date"]
-)
-
-# Define the 500 bottom-level product-store series.
-leaves = (
-    history[["item_id", "store_id", "state_id"]]
-    .drop_duplicates()
-    .sort_values(["state_id", "store_id", "item_id"])
-    .reset_index(drop=True)
-)
-
-leaves["leaf_id"] = leaves["item_id"] + "__" + leaves["store_id"]
-
-if len(leaves) != 500:
-    raise ValueError(
-        f"Expected 500 product-store series, found {len(leaves)}."
-    )
-
-# Define all 564 nodes in the same order as the saved matrix.
-leaves["state_node"] = "STATE__" + leaves["state_id"]
-leaves["store_node"] = "STORE__" + leaves["store_id"]
-leaves["product_node"] = "PRODUCT__" + leaves["item_id"]
-
-nodes = (
-    ["TOTAL"]
-    + sorted(leaves["state_node"].unique())
-    + sorted(leaves["store_node"].unique())
-    + sorted(leaves["product_node"].unique())
-    + sorted(leaves["leaf_id"].unique())
-)
-
-node_index = {node: i for i, node in enumerate(nodes)}
-
-# Build the summation matrix: each row describes a hierarchy node,
-# and each column represents one product-store series.
-S = np.zeros((len(nodes), len(leaves)), dtype=float)
-
-for j, row in leaves.iterrows():
-    memberships = [
-        "TOTAL",
-        row["state_node"],
-        row["store_node"],
-        row["product_node"],
-        row["leaf_id"],
-    ]
-
-    for node in memberships:
-        S[node_index[node], j] = 1.0
-
-print("Summation matrix:", S.shape)
-
-# Aggregate actual historical demand independently at each node.
-history["leaf_id"] = history["item_id"] + "__" + history["store_id"]
-history["state_node"] = "STATE__" + history["state_id"]
-history["store_node"] = "STORE__" + history["store_id"]
-history["product_node"] = "PRODUCT__" + history["item_id"]
-
-parts = []
-
-def add_node_aggregates(group_col):
-    grouped = (
-        history.groupby([group_col, "date"], as_index=False)["sales"]
-        .sum()
-        .rename(columns={group_col: "node", "sales": "actual_sales"})
-    )
-    parts.append(grouped)
-
-add_node_aggregates("state_node")
-add_node_aggregates("store_node")
-add_node_aggregates("product_node")
-add_node_aggregates("leaf_id")
-
-total = (
-    history.groupby("date", as_index=False)["sales"]
-    .sum()
-    .rename(columns={"sales": "actual_sales"})
-)
-total["node"] = "TOTAL"
-parts.append(total[["node", "date", "actual_sales"]])
-
-node_history = pd.concat(parts, ignore_index=True)
-node_history = node_history.sort_values(["node", "date"])
-
-# Rolling one-day-ahead aggregate baseline:
-# forecast each date using actual demand from seven days earlier.
-node_history["base_forecast"] = (
-    node_history.groupby("node", sort=False)["actual_sales"]
-    .shift(7)
-)
-
-# Keep only validation dates.
-validation_dates = sorted(forecast["date"].unique())
-
-node_history = node_history[
-    node_history["date"].isin(validation_dates)
-].copy()
-
-# Use LightGBM as the bottom-level base forecast.
-forecast["leaf_id"] = forecast["item_id"] + "__" + forecast["store_id"]
-
-leaf_predictions = forecast.set_index(["date", "leaf_id"])["predicted_sales"]
-
-# Build base forecast vector for each validation date.
-# Aggregate nodes use their own 7-day seasonal forecasts;
-# leaf nodes use the existing LightGBM predictions.
-aggregate_lookup = node_history.set_index(["date", "node"])["base_forecast"]
-
-reconciled_rows = []
-leaf_rows = []
-
-print("Reconciling forecasts...", flush=True)
-
-# OLS reconciliation:
-# bottom forecasts = (S' S)^(-1) S' times all-node base forecasts.
-# Solve the linear system instead of explicitly inverting S' S.
-G = np.linalg.solve(S.T @ S, S.T)
-
-for date in validation_dates:
-    y_hat = np.zeros(len(nodes), dtype=float)
-
-    for node in nodes:
-        if node in set(leaves["leaf_id"]):
-            key = (pd.Timestamp(date), node)
-            if key not in leaf_predictions.index:
-                raise ValueError(f"Missing LightGBM forecast: {key}")
-            value = float(leaf_predictions.loc[key])
-        else:
-            key = (pd.Timestamp(date), node)
-            if key not in aggregate_lookup.index:
-                raise ValueError(f"Missing aggregate forecast: {key}")
-            value = float(aggregate_lookup.loc[key])
-
-        if not np.isfinite(value):
-            raise ValueError(f"Invalid forecast for {node} on {date}")
-        y_hat[node_index[node]] = value
-
-    # Estimate reconciled bottom-level forecasts using OLS.
-    bottom_reconciled = G @ y_hat
-
-    # Demand cannot be negative. Clip bottom-level forecasts, then
-    # aggregate them again to preserve exact hierarchy consistency.
-    bottom_reconciled = np.clip(bottom_reconciled, 0, None)
-    coherent_all_nodes = S @ bottom_reconciled
-
-    for j, row in leaves.iterrows():
-        leaf_rows.append({
-            "date": pd.Timestamp(date),
-            "item_id": row["item_id"],
-            "store_id": row["store_id"],
-            "state_id": row["state_id"],
-            "actual_sales": float(
-                forecast.loc[
-                    (forecast["date"] == pd.Timestamp(date))
-                    & (forecast["leaf_id"] == row["leaf_id"]),
-                    "actual_sales",
-                ].iloc[0]
-            ),
-            "original_lightgbm": float(
-                leaf_predictions.loc[(pd.Timestamp(date), row["leaf_id"])]
-            ),
-            "reconciled_forecast": float(bottom_reconciled[j]),
-        })
-
-    for i, node in enumerate(nodes):
-        reconciled_rows.append({
-            "date": pd.Timestamp(date),
-            "node": node,
-            "reconciled_forecast": float(coherent_all_nodes[i]),
-        })
-
-leaf_output = pd.DataFrame(leaf_rows)
-hierarchy_output = pd.DataFrame(reconciled_rows)
-
-leaf_path = OUTPUT_DIR / "reconciled_leaf_forecasts.csv"
-hierarchy_path = OUTPUT_DIR / "reconciled_hierarchical_forecasts.csv"
-
-leaf_output.to_csv(leaf_path, index=False)
-hierarchy_output.to_csv(hierarchy_path, index=False)
-
-def calculate_metrics(actual, predicted):
     actual = np.asarray(actual, dtype=float)
     predicted = np.asarray(predicted, dtype=float)
 
-    mae = np.mean(np.abs(actual - predicted))
-    rmse = np.sqrt(np.mean((actual - predicted) ** 2))
-    wape = (
-        np.sum(np.abs(actual - predicted)) / np.sum(np.abs(actual)) * 100
-        if np.sum(np.abs(actual)) > 0
-        else np.nan
-    )
+    denominator = np.sum(np.abs(actual))
+
+    if denominator == 0:
+        return np.nan
+
+    return (
+        np.sum(np.abs(actual - predicted)) / denominator
+    ) * 100
+
+
+def calculate_metrics(actual, predicted, level):
+
+    actual = np.asarray(actual, dtype=float)
+    predicted = np.asarray(predicted, dtype=float)
 
     return {
-        "MAE": mae,
-        "RMSE": rmse,
-        "WAPE_percent": wape,
+        "level": level,
+        "MAE": np.mean(np.abs(actual - predicted)),
+        "RMSE": np.sqrt(np.mean((actual - predicted) ** 2)),
+        "WAPE": calculate_wape(actual, predicted)
     }
 
-original_metrics = calculate_metrics(
-    leaf_output["actual_sales"],
-    leaf_output["original_lightgbm"],
+
+def validate_file(path):
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+
+
+# ============================================================
+# 3. LOAD DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("HIERARCHICAL FORECAST RECONCILIATION")
+print("=" * 70)
+
+print("\nLoading project files...")
+
+for path in [TRAIN_PATH, VALIDATION_PATH, HIERARCHY_PATH]:
+    validate_file(path)
+
+
+# Load only the required training columns.
+train_df = pd.read_csv(
+    TRAIN_PATH,
+    usecols=[
+        "item_id",
+        "store_id",
+        "state_id"
+    ]
 )
 
-reconciled_metrics = calculate_metrics(
-    leaf_output["actual_sales"],
-    leaf_output["reconciled_forecast"],
+validation_df = pd.read_csv(
+    VALIDATION_PATH
 )
 
-metrics = pd.DataFrame([
-    {"model": "Original LightGBM", **original_metrics},
-    {"model": "OLS reconciled LightGBM", **reconciled_metrics},
-])
+summation_df = pd.read_csv(
+    HIERARCHY_PATH,
+    index_col=0
+)
 
-metrics_path = OUTPUT_DIR / "reconciliation_metrics.csv"
-metrics.to_csv(metrics_path, index=False)
+print("\nTraining data:", train_df.shape)
+print("Validation data:", validation_df.shape)
+print("Summation matrix:", summation_df.shape)
 
-print("\nRECONCILIATION RESULTS")
-print(metrics.to_string(index=False))
 
-print("\nHierarchy consistency check")
-wide = hierarchy_output.pivot(
+# ============================================================
+# 4. VALIDATE INPUT COLUMNS
+# ============================================================
+
+required_train = [
+    "item_id",
+    "store_id",
+    "state_id"
+]
+
+required_validation = [
+    "item_id",
+    "store_id",
+    "date",
+    "predicted_sales",
+    "actual_sales"
+]
+
+for col in required_train:
+
+    if col not in train_df.columns:
+        raise ValueError(
+            f"Missing training column: {col}"
+        )
+
+
+for col in required_validation:
+
+    if col not in validation_df.columns:
+        raise ValueError(
+            f"Missing validation column: {col}"
+        )
+
+
+if summation_df.empty:
+    raise ValueError("Hierarchy matrix is empty.")
+
+
+# ============================================================
+# 5. VALIDATE SUMMATION MATRIX
+# ============================================================
+
+print("\nValidating summation matrix...")
+
+summation_df.index = summation_df.index.astype(str)
+
+summation_df.columns = summation_df.columns.astype(str)
+
+summation_df = summation_df.apply(
+    pd.to_numeric,
+    errors="coerce"
+)
+
+if summation_df.isna().any().any():
+
+    raise ValueError(
+        "Hierarchy matrix contains invalid values."
+    )
+
+
+S = summation_df.values.astype(float)
+
+if not np.isin(S, [0, 1]).all():
+
+    raise ValueError(
+        "Summation matrix must contain only 0 and 1."
+    )
+
+
+all_nodes = summation_df.index.tolist()
+
+bottom_series = summation_df.columns.tolist()
+
+if len(set(all_nodes)) != len(all_nodes):
+    raise ValueError("Duplicate hierarchy nodes found.")
+
+if len(set(bottom_series)) != len(bottom_series):
+    raise ValueError("Duplicate bottom-level series found.")
+
+
+if S.shape != (len(all_nodes), len(bottom_series)):
+
+    raise ValueError(
+        "Summation matrix dimensions are inconsistent."
+    )
+
+
+if "TOTAL" not in all_nodes:
+
+    raise ValueError(
+        "TOTAL node is missing from the hierarchy."
+    )
+
+
+total_row = summation_df.loc["TOTAL"].values
+
+if not np.all(total_row == 1):
+
+    raise ValueError(
+        "TOTAL node must include every bottom-level series."
+    )
+
+
+print("Bottom-level series:", len(bottom_series))
+print("Hierarchy nodes:", len(all_nodes))
+print("Summation matrix validation: PASSED")
+
+
+# ============================================================
+# 6. PREPARE SERIES METADATA
+# ============================================================
+
+print("\nPreparing series metadata...")
+
+train_df["item_id"] = train_df["item_id"].astype(str)
+
+train_df["store_id"] = train_df["store_id"].astype(str)
+
+train_df["state_id"] = train_df["state_id"].astype(str)
+
+
+train_df["series_key"] = (
+    train_df["item_id"]
+    + "__"
+    + train_df["store_id"]
+)
+
+
+# Check that each series has only one item, store and state.
+
+for col in ["item_id", "store_id", "state_id"]:
+
+    counts = train_df.groupby("series_key")[col].nunique()
+
+    if (counts > 1).any():
+
+        raise ValueError(
+            f"A series maps to multiple {col} values."
+        )
+
+
+metadata_df = (
+    train_df[
+        [
+            "series_key",
+            "item_id",
+            "store_id",
+            "state_id"
+        ]
+    ]
+    .drop_duplicates(subset="series_key")
+    .set_index("series_key")
+)
+
+
+missing_metadata = [
+    series
+    for series in bottom_series
+    if series not in metadata_df.index
+]
+
+if missing_metadata:
+
+    raise ValueError(
+        "Missing series metadata: "
+        f"{missing_metadata[:10]}"
+    )
+
+
+extra_metadata = [
+    series
+    for series in metadata_df.index
+    if series not in bottom_series
+]
+
+if extra_metadata:
+
+    print(
+        "Warning: Training metadata contains series "
+        "not present in the hierarchy:",
+        len(extra_metadata)
+    )
+
+
+# Validate store-to-state mapping.
+
+store_state_counts = (
+    metadata_df.reset_index()
+    .groupby("store_id")["state_id"]
+    .nunique()
+)
+
+if (store_state_counts > 1).any():
+
+    raise ValueError(
+        "A store is mapped to multiple states."
+    )
+
+
+print("Metadata matching: PASSED")
+
+
+# ============================================================
+# 7. PREPARE VALIDATION FORECASTS
+# ============================================================
+
+print("\nPreparing validation forecasts...")
+
+validation_df["item_id"] = (
+    validation_df["item_id"].astype(str)
+)
+
+validation_df["store_id"] = (
+    validation_df["store_id"].astype(str)
+)
+
+
+validation_df["series_key"] = (
+    validation_df["item_id"]
+    + "__"
+    + validation_df["store_id"]
+)
+
+
+validation_df["date"] = pd.to_datetime(
+    validation_df["date"],
+    errors="coerce"
+)
+
+
+for col in ["predicted_sales", "actual_sales"]:
+
+    validation_df[col] = pd.to_numeric(
+        validation_df[col],
+        errors="coerce"
+    )
+
+
+# Reject invalid records instead of silently dropping them.
+
+if validation_df[
+    ["date", "predicted_sales", "actual_sales"]
+].isna().any().any():
+
+    raise ValueError(
+        "Validation data contains missing or invalid dates "
+        "or sales values."
+    )
+
+
+# Check duplicate date-series combinations.
+
+duplicates = validation_df.duplicated(
+    subset=["date", "series_key"],
+    keep=False
+)
+
+if duplicates.any():
+
+    raise ValueError(
+        "Duplicate date and series combinations found."
+    )
+
+
+# Check that all validation series belong to the hierarchy.
+
+unexpected_series = set(
+    validation_df["series_key"].unique()
+) - set(bottom_series)
+
+if unexpected_series:
+
+    raise ValueError(
+        "Validation data contains series not found in "
+        f"the hierarchy: {list(unexpected_series)[:10]}"
+    )
+
+
+validation_dates = sorted(
+    validation_df["date"].unique()
+)
+
+
+if len(validation_dates) != FORECAST_HORIZON:
+
+    raise ValueError(
+        f"Expected {FORECAST_HORIZON} validation dates, "
+        f"found {len(validation_dates)}."
+    )
+
+
+# Check that every date has every bottom-level series.
+
+expected_rows = (
+    FORECAST_HORIZON * len(bottom_series)
+)
+
+if len(validation_df) != expected_rows:
+
+    raise ValueError(
+        f"Expected {expected_rows} validation rows, "
+        f"found {len(validation_df)}."
+    )
+
+
+# ============================================================
+# 8. CREATE BOTTOM-LEVEL FORECAST MATRICES
+# ============================================================
+
+print("\nCreating bottom-level forecast matrices...")
+
+leaf_forecasts = validation_df.pivot(
     index="date",
-    columns="node",
-    values="reconciled_forecast",
+    columns="series_key",
+    values="predicted_sales"
 )
 
-max_error = 0.0
+leaf_actuals = validation_df.pivot(
+    index="date",
+    columns="series_key",
+    values="actual_sales"
+)
 
-for date in validation_dates:
-    day = leaf_output[leaf_output["date"] == pd.Timestamp(date)]
 
-    # Check that the total equals the sum of all reconciled leaves.
-    leaf_total = day["reconciled_forecast"].sum()
-    hierarchy_total = wide.loc[pd.Timestamp(date), "TOTAL"]
+# Enforce the exact hierarchy ordering.
 
-    max_error = max(max_error, abs(leaf_total - hierarchy_total))
+leaf_forecasts = leaf_forecasts.reindex(
+    index=validation_dates,
+    columns=bottom_series
+)
 
-print("Maximum total consistency error:", round(max_error, 8))
-print("Saved leaf forecasts:", leaf_path)
-print("Saved all-node forecasts:", hierarchy_path)
-print("Saved metrics:", metrics_path)
+leaf_actuals = leaf_actuals.reindex(
+    index=validation_dates,
+    columns=bottom_series
+)
+
+
+if leaf_forecasts.isna().any().any():
+
+    raise ValueError(
+        "Missing bottom-level forecast values."
+    )
+
+
+if leaf_actuals.isna().any().any():
+
+    raise ValueError(
+        "Missing bottom-level actual values."
+    )
+
+
+original_leaf_values = (
+    leaf_forecasts.values.astype(float)
+)
+
+actual_values = (
+    leaf_actuals.values.astype(float)
+)
+
+
+print("Validation dates:", len(validation_dates))
+
+print(
+    "Bottom-level forecast matrix:",
+    original_leaf_values.shape
+)
+
+
+# ============================================================
+# 9. BOTTOM-UP HIERARCHICAL RECONCILIATION
+# ============================================================
+
+print("\nPerforming bottom-up reconciliation...")
+
+# Summation matrix:
+# 564 hierarchy nodes x 500 bottom-level series
+#
+# Bottom-level forecasts:
+# 28 dates x 500 series
+#
+# Aggregated hierarchy forecasts:
+# 28 dates x 564 nodes
+
+coherent_all_values = (
+    original_leaf_values @ S.T
+)
+
+
+coherent_df = pd.DataFrame(
+    coherent_all_values,
+    index=pd.to_datetime(validation_dates),
+    columns=all_nodes
+)
+
+
+print(
+    "Reconciled hierarchy forecast shape:",
+    coherent_all_values.shape
+)
+
+print("Bottom-up aggregation completed.")
+
+
+# ============================================================
+# 10. VALIDATE HIERARCHICAL COHERENCE
+# ============================================================
+
+print("\nValidating hierarchical coherence...")
+
+# Independently reconstruct all hierarchy values.
+
+expected_values = (
+    coherent_df[bottom_series].values @ S.T
+)
+
+
+coherence_error = np.max(
+    np.abs(
+        coherent_df[all_nodes].values - expected_values
+    )
+)
+
+
+print(
+    "Maximum coherence error:",
+    coherence_error
+)
+
+
+if coherence_error > 1e-8:
+
+    raise ValueError(
+        "Hierarchy coherence validation failed."
+    )
+
+
+print("Hierarchy coherence: PASSED")
+
+
+# ============================================================
+# 11. CALCULATE HIERARCHY ACTUAL VALUES
+# ============================================================
+
+print("\nAggregating actual demand...")
+
+actual_all_values = (
+    actual_values @ S.T
+)
+
+
+actual_all_df = pd.DataFrame(
+    actual_all_values,
+    index=pd.to_datetime(validation_dates),
+    columns=all_nodes
+)
+
+
+print("Actual hierarchy aggregation completed.")
+
+
+# ============================================================
+# 12. CALCULATE FORECAST METRICS
+# ============================================================
+
+print("\nCalculating forecast metrics...")
+
+metrics = []
+
+
+# Bottom-level performance.
+
+metrics.append(
+    calculate_metrics(
+        actual_values,
+        original_leaf_values,
+        "Bottom level"
+    )
+)
+
+
+# All hierarchy nodes.
+
+metrics.append(
+    calculate_metrics(
+        actual_all_values,
+        coherent_all_values,
+        "All hierarchy nodes"
+    )
+)
+
+
+# State-level performance.
+
+state_nodes = [
+    node for node in all_nodes
+    if node.startswith("STATE__")
+]
+
+if state_nodes:
+
+    metrics.append(
+        calculate_metrics(
+            actual_all_df[state_nodes].values,
+            coherent_df[state_nodes].values,
+            "State level"
+        )
+    )
+
+
+# Store-level performance.
+
+store_nodes = [
+    node for node in all_nodes
+    if node.startswith("STORE__")
+]
+
+if store_nodes:
+
+    metrics.append(
+        calculate_metrics(
+            actual_all_df[store_nodes].values,
+            coherent_df[store_nodes].values,
+            "Store level"
+        )
+    )
+
+
+# Product-level performance.
+
+product_nodes = [
+    node for node in all_nodes
+    if node.startswith("PRODUCT__")
+]
+
+if product_nodes:
+
+    metrics.append(
+        calculate_metrics(
+            actual_all_df[product_nodes].values,
+            coherent_df[product_nodes].values,
+            "Product level"
+        )
+    )
+
+
+metrics_df = pd.DataFrame(metrics)
+
+
+print("\nForecast evaluation:")
+
+print(
+    metrics_df.to_string(index=False)
+)
+
+
+# ============================================================
+# 13. SAVE HIERARCHICAL FORECASTS
+# ============================================================
+
+print("\nSaving hierarchy forecasts...")
+
+coherent_df.index.name = "date"
+
+coherent_df.to_csv(
+    os.path.join(
+        OUTPUT_DIR,
+        "reconciled_hierarchical_forecasts.csv"
+    )
+)
+
+
+# ============================================================
+# 14. SAVE BOTTOM-LEVEL FORECASTS
+# ============================================================
+
+print("\nSaving bottom-level forecast comparison...")
+
+bottom_output = pd.DataFrame(
+    {
+        "date": np.repeat(
+            validation_dates,
+            len(bottom_series)
+        ),
+
+        "series_key": np.tile(
+            bottom_series,
+            len(validation_dates)
+        ),
+
+        "actual_sales": actual_values.flatten(),
+
+        "original_forecast": original_leaf_values.flatten(),
+
+        "reconciled_forecast": (
+            original_leaf_values.flatten()
+        )
+    }
+)
+
+
+bottom_output.to_csv(
+    os.path.join(
+        OUTPUT_DIR,
+        "reconciled_bottom_level_forecasts.csv"
+    ),
+    index=False
+)
+
+
+# ============================================================
+# 15. SAVE METRICS
+# ============================================================
+
+metrics_df.to_csv(
+    os.path.join(
+        OUTPUT_DIR,
+        "reconciliation_metrics.csv"
+    ),
+    index=False
+)
+
+
+# ============================================================
+# 16. SAVE COHERENCE VALIDATION
+# ============================================================
+
+validation_summary = pd.DataFrame(
+    {
+        "maximum_coherence_error": [
+            coherence_error
+        ],
+
+        "bottom_level_series": [
+            len(bottom_series)
+        ],
+
+        "hierarchy_nodes": [
+            len(all_nodes)
+        ],
+
+        "forecast_horizon": [
+            FORECAST_HORIZON
+        ],
+
+        "reconciliation_method": [
+            "bottom_up"
+        ],
+
+        "hierarchy_coherent": [
+            coherence_error <= 1e-8
+        ]
+    }
+)
+
+
+validation_summary.to_csv(
+    os.path.join(
+        OUTPUT_DIR,
+        "reconciliation_validation.csv"
+    ),
+    index=False
+)
+
+
+# ============================================================
+# 17. FINAL SUMMARY
+# ============================================================
+
+print("\n" + "=" * 70)
+
+print("HIERARCHICAL RECONCILIATION COMPLETED")
+
+print("=" * 70)
+
+print("\nProject summary:")
+
+print("Bottom-level series:", len(bottom_series))
+
+print("Hierarchy nodes:", len(all_nodes))
+
+print("Forecast horizon:", FORECAST_HORIZON)
+
+print("Reconciliation method: Bottom-Up")
+
+print("Maximum coherence error:", coherence_error)
+
+print("Hierarchy coherence: PASSED")
+
+
+print("\nSaved files:")
+
+print("1. reconciled_hierarchical_forecasts.csv")
+
+print("2. reconciled_bottom_level_forecasts.csv")
+
+print("3. reconciliation_metrics.csv")
+
+print("4. reconciliation_validation.csv")
+
+
+print("\nAll steps finished successfully.")
